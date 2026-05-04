@@ -95,10 +95,8 @@ async function checkForAppointment(): Promise<void> {
       log("Termin unverändert – kein Alarm.");
     }
 
-    const duration = ((Date.now() - start) / 1000).toFixed(1);
-    await sendDiscordNotification(
-      `✅ Check abgeschlossen – Termin: ${appointmentText} | Dauer: ${duration}s`
-    );
+    // const duration = ((Date.now() - start) / 1000).toFixed(1);
+    // await sendDiscordNotification(`✅ Check abgeschlossen – Termin: ${appointmentText} | Dauer: ${duration}s`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log(`Fehler: ${msg}`);
