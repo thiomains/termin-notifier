@@ -1,27 +1,17 @@
 import { chromium } from "playwright";
 import { config } from "./config.js";
-import { log, sendDiscordNotification } from "./notifier.js";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { log, sendDiscordNotification, pingUser } from "./notifier.js";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 let lastAppointmentText: string | null = null;
 
-const CHECKBOX_IDS = [
-  "doclist_item_1616_755766",
-  "doclist_item_1616_755767",
-  "doclist_item_1616_755768",
-  "doclist_item_1616_755770",
-  "doclist_item_1616_755776",
-  "doclist_item_1616_755771",
-  "doclist_item_1616_755775",
-  "doclist_item_1616_755769",
-  "doclist_item_1616_755774",
-] as const;
-
 async function checkForAppointment(): Promise<void> {
+  const start = Date.now();
   const browser = await chromium.launch({ headless: config.headless });
   const context = await browser.newContext({ locale: "de-DE" });
   const page = await context.newPage();
+  let screenshotPath: string | undefined;
 
   try {
     log("Seite laden...");
@@ -50,20 +40,22 @@ async function checkForAppointment(): Promise<void> {
     // 4. WeiterButton klicken
     log("Klicke WeiterButton...");
     await page.click("#WeiterButton");
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(2000);
 
-    // 5. Checkboxes per JS anhaken (ohne Klick, um Viewport-Probleme zu umgehen)
+    // 5. Alle Checkboxes im .doclist-Element anhaken
     log("Setze Haken...");
-    await page.evaluate((ids) => {
-      for (const id of ids) {
-        const cb = document.getElementById(id) as HTMLInputElement | null;
-        if (cb && !cb.checked) {
+    await page.evaluate(() => {
+      const doclist = document.querySelector(".doclist");
+      if (!doclist) return;
+      const checkboxes = doclist.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+      for (const cb of checkboxes) {
+        if (!cb.checked) {
           cb.checked = true;
           cb.dispatchEvent(new Event("change", { bubbles: true }));
           cb.dispatchEvent(new Event("click", { bubbles: true }));
         }
       }
-    }, [...CHECKBOX_IDS]);
+    });
     await page.waitForTimeout(1000);
 
     // 6. OKButton klicken
@@ -77,8 +69,14 @@ async function checkForAppointment(): Promise<void> {
     const appointmentText = (await nextDateEl.textContent())?.trim() ?? "";
 
     if (!appointmentText) {
+      screenshotPath = await saveScreenshot(page, "no-date");
       log("Kein Termin-Text gefunden – speichere Screenshot");
-      await saveScreenshot(page, "no-date");
+
+      const duration = ((Date.now() - start) / 1000).toFixed(1);
+      await sendDiscordNotification(
+        `${pingUser()} ⚠️ Kein Termin-Text gefunden (Screenshot im Anhang)\nDauer: ${duration}s`,
+        screenshotPath
+      );
       return;
     }
 
@@ -89,30 +87,43 @@ async function checkForAppointment(): Promise<void> {
       lastAppointmentText = appointmentText;
 
       log(`Termin hat sich geändert! Vorher: ${previous} → Jetzt: ${appointmentText}`);
+      const duration = ((Date.now() - start) / 1000).toFixed(1);
       await sendDiscordNotification(
-        `🔔 **Neuer Termin verfügbar!**\nVorher: ${previous}\nJetzt: ${appointmentText}\n${config.siteUrl}`
+        `${pingUser()} 🔔 **Neuer Termin verfügbar!**\nVorher: ${previous}\nJetzt: ${appointmentText}\n${config.siteUrl}\nDauer: ${duration}s`
       );
     } else {
       log("Termin unverändert – kein Alarm.");
     }
+
+    const duration = ((Date.now() - start) / 1000).toFixed(1);
+    await sendDiscordNotification(
+      `✅ Check abgeschlossen – Termin: ${appointmentText} | Dauer: ${duration}s`
+    );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log(`Fehler: ${msg}`);
-    await saveScreenshot(page, "error");
+    screenshotPath = await saveScreenshot(page, "error");
+
+    const duration = ((Date.now() - start) / 1000).toFixed(1);
+    await sendDiscordNotification(
+      `${pingUser()} ❌ **Fehler beim Check:** ${msg}\nDauer: ${duration}s`,
+      screenshotPath
+    );
   } finally {
     await browser.close();
   }
 }
 
-async function saveScreenshot(page: import("playwright").Page, prefix: string): Promise<void> {
+async function saveScreenshot(page: import("playwright").Page, prefix: string): Promise<string | undefined> {
   const dir = "screenshots";
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const path = join(dir, `${prefix}-${Date.now()}.png`);
   try {
     await page.screenshot({ path, fullPage: true });
     log(`Screenshot: ${path}`);
+    return path;
   } catch {
-    // Screenshot selbst fehlgeschlagen
+    return undefined;
   }
 }
 
